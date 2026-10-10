@@ -5,10 +5,14 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+import base64
+import hashlib
+import os
+import secrets
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
-import os
 from pathlib import Path
 
 app = FastAPI(title="Mergington High School API",
@@ -77,6 +81,61 @@ activities = {
     }
 }
 
+staff_security = HTTPBasic(auto_error=False)
+PASSWORD_HASH_ITERATIONS = 310_000
+
+
+def hash_staff_password(password: str, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, PASSWORD_HASH_ITERATIONS
+    )
+    salt_text = base64.urlsafe_b64encode(salt).decode("ascii")
+    digest_text = base64.urlsafe_b64encode(digest).decode("ascii")
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt_text}${digest_text}"
+
+
+def verify_staff_password(password: str, password_hash: str) -> bool:
+    try:
+        algorithm, rounds_text, salt_text, digest_text = password_hash.split("$", 3)
+        rounds = int(rounds_text)
+        if algorithm != "pbkdf2_sha256" or not 100_000 <= rounds <= 1_000_000:
+            return False
+        salt = base64.urlsafe_b64decode(salt_text.encode("ascii"))
+        expected_digest = base64.urlsafe_b64decode(digest_text.encode("ascii"))
+    except (AttributeError, ValueError):
+        return False
+
+    actual_digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, rounds
+    )
+    return secrets.compare_digest(actual_digest, expected_digest)
+
+
+def require_staff(
+    credentials: HTTPBasicCredentials | None = Depends(staff_security),
+) -> str:
+    username = os.getenv("STAFF_USERNAME")
+    password_hash = os.getenv("STAFF_PASSWORD_HASH")
+    if not username or not password_hash:
+        raise HTTPException(
+            status_code=503, detail="Staff authentication is not configured"
+        )
+
+    username_matches = credentials is not None and secrets.compare_digest(
+        credentials.username.encode("utf-8"), username.encode("utf-8")
+    )
+    password_matches = credentials is not None and verify_staff_password(
+        credentials.password, password_hash
+    )
+    if not username_matches or not password_matches:
+        raise HTTPException(
+            status_code=401,
+            detail="Staff authentication required",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
 
 @app.get("/")
 def root():
@@ -85,11 +144,31 @@ def root():
 
 @app.get("/activities")
 def get_activities():
+    return {
+        name: {
+            "description": activity["description"],
+            "schedule": activity["schedule"],
+            "max_participants": activity["max_participants"],
+            "participant_count": len(activity["participants"]),
+        }
+        for name, activity in activities.items()
+    }
+
+
+@app.get("/staff/session")
+def verify_staff_session(staff_username: str = Depends(require_staff)):
+    return {"authenticated": True, "username": staff_username}
+
+
+@app.get("/staff/activities")
+def get_staff_activities(staff_username: str = Depends(require_staff)):
     return activities
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(
+    activity_name: str, email: str, staff_username: str = Depends(require_staff)
+):
     """Sign up a student for an activity"""
     # Validate activity exists
     if activity_name not in activities:
@@ -111,7 +190,9 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(
+    activity_name: str, email: str, staff_username: str = Depends(require_staff)
+):
     """Unregister a student from an activity"""
     # Validate activity exists
     if activity_name not in activities:
