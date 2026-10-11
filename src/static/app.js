@@ -2,45 +2,95 @@ document.addEventListener("DOMContentLoaded", () => {
   const activitiesList = document.getElementById("activities-list");
   const activitySelect = document.getElementById("activity");
   const signupForm = document.getElementById("signup-form");
+  const staffLoginForm = document.getElementById("staff-login-form");
+  const staffLoginContainer = document.getElementById("staff-login-container");
+  const staffPassword = document.getElementById("staff-password");
+  const staffStatus = document.getElementById("staff-status");
+  const signupContainer = document.getElementById("signup-container");
+  const staffLogoutButton = document.getElementById("staff-logout");
   const messageDiv = document.getElementById("message");
+  let staffAuthorization = null;
+  let activityRequestId = 0;
 
-  // Function to fetch activities from API
+  function encodeBasicCredentials(username, password) {
+    const bytes = new TextEncoder().encode(`${username}:${password}`);
+    let binary = "";
+    bytes.forEach((byte) => {
+      binary += String.fromCharCode(byte);
+    });
+    return `Basic ${btoa(binary)}`;
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, (character) => {
+      const entities = {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      };
+      return entities[character];
+    });
+  }
+
+  function showMessage(text, type) {
+    messageDiv.textContent = text;
+    messageDiv.className = type;
+    messageDiv.classList.remove("hidden");
+    setTimeout(() => messageDiv.classList.add("hidden"), 5000);
+  }
+
   async function fetchActivities() {
+    const requestId = ++activityRequestId;
     try {
-      const response = await fetch("/activities");
+      const endpoint = staffAuthorization ? "/staff/activities" : "/activities";
+      const headers = staffAuthorization
+        ? { Authorization: staffAuthorization }
+        : {};
+      const response = await fetch(endpoint, { headers });
+      if (requestId !== activityRequestId) {
+        return;
+      }
+      if (!response.ok) {
+        throw new Error("Failed to load activities");
+      }
       const activities = await response.json();
-
-      // Clear loading message
+      if (requestId !== activityRequestId) {
+        return;
+      }
       activitiesList.innerHTML = "";
+      activitySelect.replaceChildren(new Option("-- Select an activity --", ""));
 
-      // Populate activities list
       Object.entries(activities).forEach(([name, details]) => {
         const activityCard = document.createElement("div");
         activityCard.className = "activity-card";
-
-        const spotsLeft =
-          details.max_participants - details.participants.length;
-
-        // Create participants HTML with delete icons instead of bullet points
-        const participantsHTML =
-          details.participants.length > 0
-            ? `<div class="participants-section">
+        const participantCount = staffAuthorization
+          ? details.participants.length
+          : details.participant_count;
+        const spotsLeft = details.max_participants - participantCount;
+        const participantsHTML = staffAuthorization
+          ? `<div class="participants-section">
               <h5>Participants:</h5>
-              <ul class="participants-list">
-                ${details.participants
-                  .map(
-                    (email) =>
-                      `<li><span class="participant-email">${email}</span><button class="delete-btn" data-activity="${name}" data-email="${email}">❌</button></li>`
-                  )
-                  .join("")}
-              </ul>
+              ${
+                details.participants.length > 0
+                  ? `<ul class="participants-list">
+                      ${details.participants
+                        .map(
+                          (email) =>
+                            `<li><span class="participant-email">${escapeHtml(email)}</span><button class="delete-btn" data-activity="${escapeHtml(name)}" data-email="${escapeHtml(email)}" aria-label="Remove ${escapeHtml(email)} from ${escapeHtml(name)}">Remove</button></li>`
+                        )
+                        .join("")}
+                    </ul>`
+                  : "<p><em>No participants yet</em></p>"
+              }
             </div>`
-            : `<p><em>No participants yet</em></p>`;
+          : `<p><strong>Registered:</strong> ${participantCount}</p>`;
 
         activityCard.innerHTML = `
-          <h4>${name}</h4>
-          <p>${details.description}</p>
-          <p><strong>Schedule:</strong> ${details.schedule}</p>
+          <h4>${escapeHtml(name)}</h4>
+          <p>${escapeHtml(details.description)}</p>
+          <p><strong>Schedule:</strong> ${escapeHtml(details.schedule)}</p>
           <p><strong>Availability:</strong> ${spotsLeft} spots left</p>
           <div class="participants-container">
             ${participantsHTML}
@@ -49,25 +99,25 @@ document.addEventListener("DOMContentLoaded", () => {
 
         activitiesList.appendChild(activityCard);
 
-        // Add option to select dropdown
         const option = document.createElement("option");
         option.value = name;
         option.textContent = name;
         activitySelect.appendChild(option);
       });
 
-      // Add event listeners to delete buttons
       document.querySelectorAll(".delete-btn").forEach((button) => {
         button.addEventListener("click", handleUnregister);
       });
     } catch (error) {
+      if (requestId !== activityRequestId) {
+        return;
+      }
       activitiesList.innerHTML =
         "<p>Failed to load activities. Please try again later.</p>";
       console.error("Error fetching activities:", error);
     }
   }
 
-  // Handle unregister functionality
   async function handleUnregister(event) {
     const button = event.target;
     const activity = button.getAttribute("data-activity");
@@ -80,37 +130,24 @@ document.addEventListener("DOMContentLoaded", () => {
         )}/unregister?email=${encodeURIComponent(email)}`,
         {
           method: "DELETE",
+          headers: { Authorization: staffAuthorization },
         }
       );
 
       const result = await response.json();
 
       if (response.ok) {
-        messageDiv.textContent = result.message;
-        messageDiv.className = "success";
-
-        // Refresh activities list to show updated participants
+        showMessage(result.message, "success");
         fetchActivities();
       } else {
-        messageDiv.textContent = result.detail || "An error occurred";
-        messageDiv.className = "error";
+        showMessage(result.detail || "An error occurred", "error");
       }
-
-      messageDiv.classList.remove("hidden");
-
-      // Hide message after 5 seconds
-      setTimeout(() => {
-        messageDiv.classList.add("hidden");
-      }, 5000);
     } catch (error) {
-      messageDiv.textContent = "Failed to unregister. Please try again.";
-      messageDiv.className = "error";
-      messageDiv.classList.remove("hidden");
+      showMessage("Failed to unregister. Please try again.", "error");
       console.error("Error unregistering:", error);
     }
   }
 
-  // Handle form submission
   signupForm.addEventListener("submit", async (event) => {
     event.preventDefault();
 
@@ -124,37 +161,64 @@ document.addEventListener("DOMContentLoaded", () => {
         )}/signup?email=${encodeURIComponent(email)}`,
         {
           method: "POST",
+          headers: { Authorization: staffAuthorization },
         }
       );
 
       const result = await response.json();
 
       if (response.ok) {
-        messageDiv.textContent = result.message;
-        messageDiv.className = "success";
+        showMessage(result.message, "success");
         signupForm.reset();
-
-        // Refresh activities list to show updated participants
         fetchActivities();
       } else {
-        messageDiv.textContent = result.detail || "An error occurred";
-        messageDiv.className = "error";
+        showMessage(result.detail || "An error occurred", "error");
       }
-
-      messageDiv.classList.remove("hidden");
-
-      // Hide message after 5 seconds
-      setTimeout(() => {
-        messageDiv.classList.add("hidden");
-      }, 5000);
     } catch (error) {
-      messageDiv.textContent = "Failed to sign up. Please try again.";
-      messageDiv.className = "error";
-      messageDiv.classList.remove("hidden");
+      showMessage("Failed to sign up. Please try again.", "error");
       console.error("Error signing up:", error);
     }
   });
 
-  // Initialize app
+  staffLoginForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const username = document.getElementById("staff-username").value;
+    const password = staffPassword.value;
+    const authorization = encodeBasicCredentials(username, password);
+
+    try {
+      const response = await fetch("/staff/session", {
+        headers: { Authorization: authorization },
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        staffStatus.textContent = result.detail || "Sign in failed.";
+        staffStatus.className = "error";
+        return;
+      }
+
+      staffAuthorization = authorization;
+      staffPassword.value = "";
+      staffLoginContainer.classList.add("hidden");
+      signupContainer.classList.remove("hidden");
+      fetchActivities();
+    } catch (error) {
+      staffStatus.textContent = "Unable to sign in. Please try again.";
+      staffStatus.className = "error";
+      console.error("Error signing in:", error);
+    }
+  });
+
+  staffLogoutButton.addEventListener("click", () => {
+    staffAuthorization = null;
+    signupContainer.classList.add("hidden");
+    staffLoginContainer.classList.remove("hidden");
+    activitiesList.innerHTML = "<p>Loading activities...</p>";
+    staffStatus.textContent = "Signed out. Sign in to manage student registrations.";
+    staffStatus.className = "";
+    staffLoginForm.reset();
+    fetchActivities();
+  });
+
   fetchActivities();
 });
